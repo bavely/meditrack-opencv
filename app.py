@@ -388,6 +388,87 @@ def _blend_overwrite(canvas: np.ndarray, strip: np.ndarray, x: int, feather: int
     canvas[:h, x0:x1, :] = np.clip(blended, 0, 255).astype(np.uint8)
 
 
+def estimate_frame_rotations(
+    frames: List[np.ndarray], imu_angles: Optional[List[float]] = None
+) -> List[float]:
+    """Return cumulative yaw angles (radians) for each frame.
+
+    If ``imu_angles`` is provided and matches the number of frames it is used
+    directly (converted from degrees to radians). Otherwise, a simple optical
+    flow based tracker is employed where the median horizontal motion of good
+    feature points is converted to an approximate rotation assuming a 60°
+    field of view.
+    """
+
+    if imu_angles and len(imu_angles) == len(frames):
+        base = imu_angles[0]
+        return [np.deg2rad(a - base) for a in imu_angles]
+
+    angles = [0.0]
+    prev = cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY)
+    cum = 0.0
+    for f in frames[1:]:
+        gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+        p0 = cv2.goodFeaturesToTrack(prev, maxCorners=200, qualityLevel=0.01, minDistance=30)
+        if p0 is None or len(p0) < 4:
+            angles.append(cum)
+            prev = gray
+            continue
+        p1, st, _ = cv2.calcOpticalFlowPyrLK(prev, gray, p0, None)
+        if p1 is None:
+            angles.append(cum)
+            prev = gray
+            continue
+        valid = st.reshape(-1) == 1
+        if np.count_nonzero(valid) < 4:
+            angles.append(cum)
+            prev = gray
+            continue
+        flow = (p1 - p0)[valid]
+        shift_x = float(np.median(flow[:, 0]))
+        theta = (shift_x / frames[0].shape[1]) * np.deg2rad(60.0)
+        cum += theta
+        angles.append(cum)
+        prev = gray
+    return angles
+
+
+def map_frame_to_cylinder(frame: np.ndarray, angle: float) -> np.ndarray:
+    """Map ``frame`` onto a cylindrical surface and rotate by ``angle``.
+
+    The frame is unwrapped using ``cv2.warpPolar`` and then horizontally
+    shifted based on the provided rotation angle (in radians).
+    """
+
+    h, w = frame.shape[:2]
+    center = (w // 2, h // 2)
+    radius = min(center)
+    polar = cv2.warpPolar(
+        frame,
+        (w * 2, h),
+        center,
+        radius,
+        flags=cv2.WARP_POLAR_LINEAR + cv2.WARP_FILL_OUTLIERS,
+    )
+    shift = int((angle / (2 * np.pi)) * polar.shape[1])
+    return np.roll(polar, shift, axis=1)
+
+
+def build_panoramic_texture(frames: List[np.ndarray], angles: List[float]) -> np.ndarray:
+    """Accumulate cylindrical mappings of ``frames`` into a panorama."""
+
+    pano: Optional[np.ndarray] = None
+    for f, a in zip(frames, angles):
+        cyl = map_frame_to_cylinder(f, a)
+        if pano is None:
+            pano = np.zeros_like(cyl)
+        mask = np.any(cyl > 0, axis=2)
+        pano[mask] = cyl[mask]
+    if pano is None:
+        raise RuntimeError("No frames to build panorama.")
+    return pano
+
+
 def build_label_mosaic(strips: List[np.ndarray], base_width: int = 9000) -> np.ndarray:
     """
     Register and stitch strips horizontally. base_width is a safety canvas.
@@ -425,11 +506,19 @@ def build_label_mosaic(strips: List[np.ndarray], base_width: int = 9000) -> np.n
 
 # ============================ Core pipeline ============================
 
-def extract_flat_label_image(video_path: str, mode: str = "mosaic", debug_dir: Optional[str] = None) -> np.ndarray:
+def extract_flat_label_image(
+    video_path: str,
+    mode: str = "mosaic",
+    debug_dir: Optional[str] = None,
+    imu_angles: Optional[List[float]] = None,
+) -> np.ndarray:
+    """Extract an unwrapped label or panorama from ``video_path``.
+
+    ``mode`` can be ``"mosaic"`` (recommended), ``"cyl"`` (single best frame),
+    ``"polar"`` or ``"panorama"`` which uses rotation tracking and cylindrical
+    mapping across multiple frames.
     """
-    mode: "mosaic" (recommended), "cyl" (single best frame), or "polar".
-    """
-    if mode not in ("mosaic", "cyl", "polar"):
+    if mode not in ("mosaic", "cyl", "polar", "panorama"):
         mode = "mosaic"
 
     if mode == "cyl":
@@ -470,6 +559,15 @@ def extract_flat_label_image(video_path: str, mode: str = "mosaic", debug_dir: O
                 cv2.imwrite(os.path.join(debug_dir, "04_polar_cropped.jpg"), cropped)
             return cropped
         # fall through to mosaic if polar fails
+
+    if mode == "panorama":
+        frames = sample_sharp_frames(video_path, target_frames=13)
+        angles = estimate_frame_rotations(frames, imu_angles)
+        pano = build_panoramic_texture(frames, angles)
+        if debug_dir:
+            os.makedirs(debug_dir, exist_ok=True)
+            cv2.imwrite(os.path.join(debug_dir, "01_panorama.jpg"), pano)
+        return pano
 
     # --------- MOSAIC (multi-frame) ----------
     frames = sample_sharp_frames(video_path, target_frames=13)
@@ -527,12 +625,24 @@ def unwrap():
         file.save(tmp.name)
         tmp_path = tmp.name
 
-    mode = request.args.get("mode", "mosaic")  # "mosaic" (default), "cyl", or "polar"
+    mode = request.args.get(
+        "mode", "mosaic"
+    )  # "mosaic" (default), "cyl", "polar", or "panorama"
     debug = request.args.get("debug") == "1"
     debug_dir = os.path.join(MEDIA_DIR, "debug", uuid.uuid4().hex) if debug else None
 
+    imu_raw = request.form.get("imu") or request.args.get("imu")
+    imu_angles: Optional[List[float]] = None
+    if imu_raw:
+        try:
+            imu_angles = [float(v) for v in imu_raw.split(",") if v.strip()]
+        except Exception:
+            imu_angles = None
+
     try:
-        flat = extract_flat_label_image(tmp_path, mode=mode, debug_dir=debug_dir)
+        flat = extract_flat_label_image(
+            tmp_path, mode=mode, debug_dir=debug_dir, imu_angles=imu_angles
+        )
         filename = save_image(flat)
 
         base = request.url_root.rstrip("/")
@@ -549,6 +659,7 @@ def unwrap():
                 "03_cyl_strip.jpg",     # representative strip
                 "03_polar.jpg",
                 "04_polar_cropped.jpg",
+                "01_panorama.jpg",
             ]:
                 p = os.path.join(debug_dir, f)
                 if os.path.exists(p):
