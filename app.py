@@ -406,15 +406,22 @@ def estimate_frame_rotations(
 
     angles = [0.0]
     prev = cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY)
+    prev = np.asarray(prev, dtype=np.uint8)
+    lk_params = dict(
+        winSize=(21, 21),
+        maxLevel=3,
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+    )
     cum = 0.0
     for f in frames[1:]:
         gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+        gray = np.asarray(gray, dtype=prev.dtype)
         p0 = cv2.goodFeaturesToTrack(prev, maxCorners=200, qualityLevel=0.01, minDistance=30)
         if p0 is None or len(p0) < 4:
             angles.append(cum)
             prev = gray
             continue
-        p1, st, _ = cv2.calcOpticalFlowPyrLK(prev, gray, p0, None)
+        p1, st, _ = cv2.calcOpticalFlowPyrLK(prev, gray, p0, None, **lk_params)
         if p1 is None:
             angles.append(cum)
             prev = gray
