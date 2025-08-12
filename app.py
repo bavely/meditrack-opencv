@@ -138,30 +138,100 @@ def find_label_full_bounds(frame: np.ndarray) -> tuple[int, int]:
 
 
 def estimate_sides_at_y(frame: np.ndarray, y1: int, y2: int) -> tuple[int, int, int]:
+    """Estimate left/right edges within the label band.
+
+    The method emphasises vertical edges using a Scharr filter followed by
+    Canny edge detection and morphological closing.  Detected edges are
+    aggregated with a Hough line search for robust left/right borders.  The
+    final borders are validated across multiple horizontal rows to avoid local
+    artifacts.
     """
-    Estimate left/right edges within the label band using |dx| column energy.
-    More stable than raw Canny peaks.
-    """
+
     g = _preprocess_gray(frame)
     roi = g[y1:y2, :]
-    gx = cv2.Sobel(roi, cv2.CV_32F, 1, 0, ksize=3)
-    gx = cv2.convertScaleAbs(gx)
-    col_energy = gx.mean(axis=0)
-    col_energy = cv2.GaussianBlur(col_energy.reshape(1, -1), (1, 31), 0).ravel()
 
-    thr = float(col_energy.mean() + 0.5 * (col_energy.max() - col_energy.mean()))
+    # --- Emphasise vertical edges -------------------------------------------------
+    grad = cv2.Scharr(roi, cv2.CV_32F, 1, 0)
+    grad_abs = cv2.convertScaleAbs(grad)
+    edges = cv2.Canny(grad_abs, 50, 150)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 15))
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
 
-    def edge_from_left(arr: np.ndarray) -> int:
-        run = 0
-        for i, v in enumerate(arr):
-            run = run + 1 if v > thr else 0
-            if run >= 5:
-                return max(0, i - 4)
-        return int(0.20 * len(arr))
+    h_roi, w_roi = edges.shape
 
-    left = edge_from_left(col_energy)
-    right = len(col_energy) - edge_from_left(col_energy[::-1]) - 1
+    # --- Detect dominant vertical borders via Hough transform --------------------
+    lines = cv2.HoughLinesP(
+        edges,
+        1,
+        np.pi / 180,
+        threshold=80,
+        minLineLength=int(0.6 * h_roi),
+        maxLineGap=10,
+    )
 
+    candidate_x: List[int] = []
+    if lines is not None:
+        for x1_l, y1_l, x2_l, y2_l in lines.reshape(-1, 4):
+            if abs(x2_l - x1_l) <= max(3, int(0.01 * w_roi)):
+                if abs(y2_l - y1_l) >= 0.6 * h_roi:
+                    candidate_x.append(int((x1_l + x2_l) / 2))
+
+    left: int
+    right: int
+
+    if candidate_x:
+        left = min(candidate_x)
+        right = max(candidate_x)
+    else:
+        # fallback: use tall contours if Hough fails
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        xs: List[int] = []
+        for c in contours:
+            x, _, w_c, h_c = cv2.boundingRect(c)
+            if h_c >= 0.5 * h_roi:
+                xs.extend([x, x + w_c])
+
+        if xs:
+            left = min(xs)
+            right = max(xs)
+        else:
+            # final fallback: gradient column energy as before
+            col_energy = grad_abs.mean(axis=0)
+            col_energy = cv2.GaussianBlur(
+                col_energy.reshape(1, -1), (1, 31), 0
+            ).ravel()
+            thr = float(
+                col_energy.mean()
+                + 0.5 * (col_energy.max() - col_energy.mean())
+            )
+
+            def edge_from_left(arr: np.ndarray) -> int:
+                run = 0
+                for i, v in enumerate(arr):
+                    run = run + 1 if v > thr else 0
+                    if run >= 5:
+                        return max(0, i - 4)
+                return int(0.20 * len(arr))
+
+            left = edge_from_left(col_energy)
+            right = len(col_energy) - edge_from_left(col_energy[::-1]) - 1
+
+    # --- Validate edges across multiple rows to avoid local artifacts ------------
+    sample_rows = np.linspace(0, h_roi - 1, num=min(10, h_roi), dtype=int)
+    left_samples: List[int] = []
+    right_samples: List[int] = []
+    for r in sample_rows:
+        nz = np.where(edges[r] > 0)[0]
+        if nz.size > 0:
+            left_samples.append(int(nz[0]))
+            right_samples.append(int(nz[-1]))
+
+    if left_samples:
+        left = int(np.median(left_samples + [left]))
+    if right_samples:
+        right = int(np.median(right_samples + [right]))
+
+    # fallback to reasonable defaults if edge detection seems off
     if right - left < frame.shape[1] // 6:
         left = int(frame.shape[1] * 0.20)
         right = int(frame.shape[1] * 0.80)
