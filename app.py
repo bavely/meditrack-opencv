@@ -817,9 +817,62 @@ def extract_flat_label_image(
             cv2.imwrite(os.path.join(debug_dir, "02_bounds_overlay.jpg"), dbg)
 
     mosaic = build_label_mosaic(strips, base_width=9000)
+    # ---- Prepare mosaic for OCR ---------------------------------------------
+    gray = cv2.cvtColor(mosaic, cv2.COLOR_BGR2GRAY)
+    try:
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
+    except Exception:
+        pass
+
+    edges = cv2.Canny(gray, 50, 150)
+    lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=200)
+    angle = 0.0
+    if lines is not None:
+        angs: List[float] = []
+        for rho, theta in lines[:, 0]:
+            deg = theta * 180.0 / np.pi - 90.0
+            if -45.0 < deg < 45.0:
+                angs.append(deg)
+        if angs:
+            angle = float(np.median(angs))
+    if abs(angle) > 0.1:
+        h_m, w_m = gray.shape
+        rot = cv2.getRotationMatrix2D((w_m / 2.0, h_m / 2.0), angle, 1.0)
+        gray = cv2.warpAffine(
+            gray,
+            rot,
+            (w_m, h_m),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REPLICATE,
+        )
+
+    try:
+        denoised = cv2.fastNlMeansDenoising(
+            gray, h=10, templateWindowSize=7, searchWindowSize=21
+        )
+    except Exception:
+        denoised = gray
+
+    def sauvola(img: np.ndarray, window: int = 25, k: float = 0.2, R: float = 128) -> np.ndarray:
+        mean = cv2.boxFilter(img, cv2.CV_32F, (window, window))
+        sqmean = cv2.sqrBoxFilter(img, cv2.CV_32F, (window, window))
+        std = np.sqrt(np.maximum(sqmean - mean * mean, 0.0))
+        thresh = mean * (1 + k * (std / R - 1))
+        out = (img.astype(np.float32) > thresh).astype(np.uint8) * 255
+        return out
+
+    try:
+        mosaic = sauvola(denoised)
+    except Exception:
+        _, mosaic = cv2.threshold(
+            denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+
     if debug_dir:
         # still drop a representative strip for continuity with your debug viewer
         cv2.imwrite(os.path.join(debug_dir, "03_cyl_strip.jpg"), strips[0])
+        cv2.imwrite(os.path.join(debug_dir, "04_ocr_ready.jpg"), mosaic)
     return mosaic
 
 
