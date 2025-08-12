@@ -440,31 +440,53 @@ def unwrap_cylindrical_band_consistent(
     )
 
 
-def _phase_shift(a: np.ndarray, b: np.ndarray, search_y_frac: float = 0.5) -> int:
+def _phase_shift(a: np.ndarray, b: np.ndarray, search_y_frac: float = 0.5) -> float:
     """
-    Estimate horizontal shift between two unwrapped strips using phase correlation.
-    We take a horizontal band around the center (text is strongest there).
+    Estimate horizontal shift between two unwrapped strips using feature matching.
+    ORB/SIFT keypoints are extracted on overlapping regions and a homography is
+    computed with RANSAC to reject outliers.  The resulting translation provides
+    sub-pixel alignment.
     """
     ha, wa = a.shape[:2]
-    hb, wb = b.shape[:2]
 
-    # central band (guarantee at least 8 rows)
+    # central band to focus on label text
     band_frac = max(0.2, min(0.6, search_y_frac))
     y0 = int(ha * (0.5 - band_frac / 2.0))
     y1 = int(ha * (0.5 + band_frac / 2.0))
     y0 = max(0, min(ha - 8, y0))
     y1 = max(y0 + 8, min(ha, y1))
 
-    ga = cv2.cvtColor(a[y0:y1], cv2.COLOR_BGR2GRAY).astype(np.float32)
-    gb = cv2.cvtColor(b[y0:y1], cv2.COLOR_BGR2GRAY).astype(np.float32)
+    ga = cv2.cvtColor(a[y0:y1], cv2.COLOR_BGR2GRAY)
+    gb = cv2.cvtColor(b[y0:y1], cv2.COLOR_BGR2GRAY)
 
-    # 1D Hanning window across width, broadcast per row (avoids shape mismatch)
-    win = np.hanning(ga.shape[1]).astype(np.float32)[None, :]
-    ga = ga * win
-    gb = gb * win
+    # fall back to ORB if SIFT is unavailable
+    try:
+        detector = cv2.SIFT_create()
+        norm = cv2.NORM_L2
+    except Exception:
+        detector = cv2.ORB_create(800)
+        norm = cv2.NORM_HAMMING
 
-    (shift_x, _), _ = cv2.phaseCorrelate(ga, gb)
-    return int(round(shift_x))
+    kp1, des1 = detector.detectAndCompute(ga, None)
+    kp2, des2 = detector.detectAndCompute(gb, None)
+    if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
+        return 0.0
+
+    matcher = cv2.BFMatcher(norm, crossCheck=True)
+    matches = matcher.match(des1, des2)
+    if len(matches) < 4:
+        return 0.0
+    matches = sorted(matches, key=lambda m: m.distance)[:200]
+
+    pts1 = np.float32([kp1[m.queryIdx].pt for m in matches])
+    pts2 = np.float32([kp2[m.trainIdx].pt for m in matches])
+    H, mask = cv2.findHomography(pts2, pts1, cv2.RANSAC, 5.0)
+    if H is None:
+        return 0.0
+
+    # translation component gives horizontal shift (b -> a)
+    shift_x = float(H[0, 2])
+    return shift_x
 
 
 def _blend_overwrite(canvas: np.ndarray, strip: np.ndarray, x: int, feather: int = 32):
@@ -497,6 +519,33 @@ def _blend_overwrite(canvas: np.ndarray, strip: np.ndarray, x: int, feather: int
     s = strip[:, s0:s1, :].astype(np.float32)
     blended = (alpha[..., None] * s + (1.0 - alpha[..., None]) * roi)
     canvas[:h, x0:x1, :] = np.clip(blended, 0, 255).astype(np.uint8)
+
+
+def _multiband_blend(base: np.ndarray, overlay: np.ndarray, mask: np.ndarray, levels: int = 4) -> np.ndarray:
+    """Blend ``overlay`` onto ``base`` using ``mask`` via Laplacian pyramids."""
+    gp_base = [base.astype(np.float32)]
+    gp_overlay = [overlay.astype(np.float32)]
+    gp_mask = [mask.astype(np.float32)]
+    for _ in range(levels):
+        gp_base.append(cv2.pyrDown(gp_base[-1]))
+        gp_overlay.append(cv2.pyrDown(gp_overlay[-1]))
+        gp_mask.append(cv2.pyrDown(gp_mask[-1]))
+    lp_base = [gp_base[-1]]
+    lp_overlay = [gp_overlay[-1]]
+    for i in range(levels, 0, -1):
+        size = gp_base[i - 1].shape[1::-1]
+        lap_b = gp_base[i - 1] - cv2.pyrUp(gp_base[i], dstsize=size)
+        lap_o = gp_overlay[i - 1] - cv2.pyrUp(gp_overlay[i], dstsize=size)
+        lp_base.append(lap_b)
+        lp_overlay.append(lap_o)
+    blended_pyr = []
+    for lb, lo, gm in zip(lp_base, lp_overlay, gp_mask[::-1]):
+        blended = gm[..., None] * lo + (1.0 - gm[..., None]) * lb
+        blended_pyr.append(blended)
+    img = blended_pyr[0]
+    for b in blended_pyr[1:]:
+        img = cv2.pyrUp(img, dstsize=b.shape[1::-1]) + b
+    return np.clip(img, 0, 255).astype(np.uint8)
 
 
 def estimate_frame_rotations(
@@ -595,22 +644,46 @@ def build_label_mosaic(strips: List[np.ndarray], base_width: int = 9000) -> np.n
         raise RuntimeError("No strips to stitch.")
     h = max(s.shape[0] for s in strips)
     canvas = np.zeros((h, base_width, 3), np.uint8)
-    # place first strip in the middle
     x_positions = [base_width // 2 - strips[0].shape[1] // 2]
-    _blend_overwrite(canvas, strips[0], x_positions[0])
+    canvas[:, x_positions[0] : x_positions[0] + strips[0].shape[1]] = strips[0]
 
-    # stitch others alternating left/right using phase correlation to the first strip
     left_side = True
     for i in range(1, len(strips)):
         ref_idx = 0
         shift = _phase_shift(strips[ref_idx], strips[i])
+        int_shift = int(np.floor(shift))
+        frac_shift = shift - int_shift
+        M = np.float32([[1, 0, frac_shift], [0, 1, 0]])
+        aligned = cv2.warpAffine(
+            strips[i], M, (strips[i].shape[1], strips[i].shape[0]), flags=cv2.INTER_LINEAR
+        )
         if left_side:
-            x_new = x_positions[ref_idx] - strips[i].shape[1] + shift
+            x_new = x_positions[ref_idx] - strips[i].shape[1] + int_shift
         else:
-            x_new = x_positions[ref_idx] + strips[ref_idx].shape[1] + shift
+            x_new = x_positions[ref_idx] + strips[ref_idx].shape[1] + int_shift
         left_side = not left_side
         x_positions.append(x_new)
-        _blend_overwrite(canvas, strips[i], x_new)
+
+        h_s, w_s = aligned.shape[:2]
+        x0 = max(0, x_new)
+        x1 = min(base_width, x_new + w_s)
+        if x1 <= x0:
+            continue
+        s0 = max(0, -x_new)
+        s1 = s0 + (x1 - x0)
+
+        roi_base = canvas[:h_s, x0:x1]
+        roi_overlay = aligned[:, s0:s1]
+        mask = np.ones((h_s, x1 - x0), np.float32)
+        feather = min(32, x1 - x0)
+        if x0 > 0:
+            ramp = np.linspace(0.0, 1.0, feather, dtype=np.float32)
+            mask[:, :feather] = ramp[None, :]
+        if x1 < base_width:
+            ramp = np.linspace(1.0, 0.0, feather, dtype=np.float32)
+            mask[:, -feather:] = np.minimum(mask[:, -feather:], ramp[None, :])
+        blended = _multiband_blend(roi_base, roi_overlay, mask)
+        canvas[:h_s, x0:x1] = blended
 
     # crop to content (remove empty margins)
     gray = cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY)
