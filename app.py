@@ -245,23 +245,25 @@ def unwrap_cylindrical_band(
     y1: int,
     y2: int,
     cx: int,
-    left: int,
-    right: int,
+    radius: int,
+    fov: Optional[float] = None,
     out_w: int = 2048,
 ) -> np.ndarray:
-    """
-    Cylindrical inverse mapping for the ENTIRE label band.
-    x_in = cx + f * tan(theta), theta in [-FOV, +FOV].
+    """Cylindrical inverse mapping for the ENTIRE label band.
+
+    ``radius`` is the detected cylinder radius in pixels. ``fov`` is the horizontal
+    field of view in radians.  If ``fov`` is ``None`` it is estimated from the
+    frame width and radius.
     """
     band = frame[y1:y2, :, :]
     h, w = band.shape[:2]
     out_h = h
 
-    radius = max(1.0, (right - left) / 2.0)  # visible half-width
-    f = radius  # focal length approx
-
-    # Wider FOV to cover more of the visible curvature
-    theta_min, theta_max = np.deg2rad(-88), np.deg2rad(88)
+    radius = max(1.0, float(radius))
+    f = radius  # focal length approximation in pixels
+    if fov is None:
+        fov = 2.0 * np.arctan((w / 2.0) / f)
+    theta_min, theta_max = -fov / 2.0, fov / 2.0
 
     map_x = np.zeros((out_h, out_w), dtype=np.float32)
     map_y = np.zeros((out_h, out_w), dtype=np.float32)
@@ -274,7 +276,13 @@ def unwrap_cylindrical_band(
     for y_out in range(out_h):
         map_y[y_out, :] = y_out
 
-    return cv2.remap(band, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return cv2.remap(
+        band,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
 
 
 # -------- (Optional) polar helpers kept for experimentation -------- #
@@ -305,6 +313,27 @@ def detect_cylinder_center_radius(frame: np.ndarray) -> Optional[Tuple[Tuple[int
     if r > 0:
         return (w // 2, int(h * 0.45)), r
     return None
+
+
+def detect_cylinder_center_radius_multi(
+    frames: List[np.ndarray],
+) -> Optional[Tuple[int, int, int]]:
+    """Detect cylinder cross-section across several frames and return median center/radius.
+
+    Returns (cx, cy, r) if any detections succeed, otherwise ``None``.
+    """
+    detections: List[Tuple[int, int, int]] = []
+    for f in frames:
+        det = detect_cylinder_center_radius(f)
+        if det:
+            (cx, cy), r = det
+            detections.append((cx, cy, r))
+    if not detections:
+        return None
+    cx = int(np.median([d[0] for d in detections]))
+    cy = int(np.median([d[1] for d in detections]))
+    r = int(np.median([d[2] for d in detections]))
+    return cx, cy, r
 
 
 def unwrap_with_warp_polar(frame: np.ndarray, center: Tuple[int, int], radius: int) -> np.ndarray:
@@ -380,23 +409,35 @@ def find_label_full_bounds_union(frames: List[np.ndarray]) -> tuple[int, int]:
 
 
 def unwrap_cylindrical_band_consistent(
-    frame: np.ndarray, y1: int, y2: int, out_w: int, cx: int, left: int, right: int
+    frame: np.ndarray,
+    y1: int,
+    y2: int,
+    out_w: int,
+    cx: int,
+    radius: int,
+    fov: Optional[float] = None,
 ) -> np.ndarray:
-    """Same as unwrap_cylindrical_band, but parameterized so all strips share geometry."""
+    """Same as :func:`unwrap_cylindrical_band` but parameterized for multiple strips."""
     band = frame[y1:y2, :, :]
     h, w = band.shape[:2]
-    radius = max(1.0, (right - left) / 2.0)
+    radius = max(1.0, float(radius))
     f = radius
-    theta_min, theta_max = np.deg2rad(-88), np.deg2rad(88)
+    if fov is None:
+        fov = 2.0 * np.arctan((w / 2.0) / f)
+    theta_min, theta_max = -fov / 2.0, fov / 2.0
 
     map_x = np.zeros((h, out_w), dtype=np.float32)
     map_y = np.zeros((h, out_w), dtype=np.float32)
-    thetas = theta_min + (theta_max - theta_min) * (np.arange(out_w) / max(1, (out_w - 1)))
+    thetas = theta_min + (theta_max - theta_min) * (
+        np.arange(out_w) / max(1, (out_w - 1))
+    )
     x_in = cx + f * np.tan(thetas)
     x_in = np.clip(x_in, 0, w - 1).astype(np.float32)
     map_x[:] = x_in
     map_y[:] = np.arange(h, dtype=np.float32)[:, None]
-    return cv2.remap(band, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return cv2.remap(
+        band, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+    )
 
 
 def _phase_shift(a: np.ndarray, b: np.ndarray, search_y_frac: float = 0.5) -> int:
@@ -605,18 +646,33 @@ def extract_flat_label_image(
             cv2.imwrite(os.path.join(debug_dir, "01_best_frame.jpg"), frame)
 
         y1, y2 = find_label_full_bounds(frame)
-        left, right, cx = estimate_sides_at_y(frame, y1, y2)
+        circle = detect_cylinder_center_radius(frame)
+        if circle:
+            (cx, _cy), radius = circle
+        else:
+            left, right, cx = estimate_sides_at_y(frame, y1, y2)
+            radius = max(1, (right - left) // 2)
 
         if debug_dir:
             dbg = frame.copy()
             cv2.line(dbg, (0, y1), (dbg.shape[1], y1), (0, 255, 0), 2)
             cv2.line(dbg, (0, y2), (dbg.shape[1], y2), (0, 255, 0), 2)
-            cv2.line(dbg, (left, y1), (left, y2), (255, 0, 0), 2)
-            cv2.line(dbg, (right, y1), (right, y2), (255, 0, 0), 2)
-            cv2.line(dbg, (((left + right) // 2), y1), (((left + right) // 2), y2), (0, 0, 255), 2)
+            if circle:
+                cv2.circle(dbg, (cx, _cy), radius, (255, 0, 0), 2)
+            else:
+                cv2.line(dbg, (left, y1), (left, y2), (255, 0, 0), 2)
+                cv2.line(dbg, (right, y1), (right, y2), (255, 0, 0), 2)
+                cv2.line(
+                    dbg,
+                    (((left + right) // 2), y1),
+                    (((left + right) // 2), y2),
+                    (0, 0, 255),
+                    2,
+                )
             cv2.imwrite(os.path.join(debug_dir, "02_bounds_overlay.jpg"), dbg)
 
-        strip = unwrap_cylindrical_band(frame, y1, y2, (left + right) // 2, left, right)
+        fov = 2.0 * np.arctan((frame.shape[1] / 2.0) / float(radius))
+        strip = unwrap_cylindrical_band(frame, y1, y2, cx, radius, fov)
         if debug_dir:
             cv2.imwrite(os.path.join(debug_dir, "03_cyl_strip.jpg"), strip)
         return strip
@@ -654,19 +710,37 @@ def extract_flat_label_image(
 
     y1, y2 = find_label_full_bounds_union(frames)
 
+    circle_params = detect_cylinder_center_radius_multi(frames)
+    if circle_params:
+        CX0, CY0, RAD0 = circle_params
+        FOV0 = 2.0 * np.arctan((frames[0].shape[1] / 2.0) / float(RAD0))
+    else:
+        CX0 = CY0 = RAD0 = FOV0 = None
+
     out_w = 1024  # per-strip width; ~30–40% overlap appears naturally from geometry
     strips: List[np.ndarray] = []
     for i, f in enumerate(frames):
-        L, R, CX = estimate_sides_at_y(f, y1, y2)
-        strip = unwrap_cylindrical_band_consistent(f, y1, y2, out_w, CX, L, R)
+        L, R, CX_est = estimate_sides_at_y(f, y1, y2)
+        if circle_params:
+            cx = CX0
+            radius = RAD0
+            fov = FOV0
+        else:
+            cx = CX_est
+            radius = max(1, (R - L) // 2)
+            fov = 2.0 * np.arctan((f.shape[1] / 2.0) / float(radius))
+        strip = unwrap_cylindrical_band_consistent(f, y1, y2, out_w, cx, radius, fov)
         strips.append(strip)
         if debug_dir and i == 0:
             dbg = f.copy()
             cv2.line(dbg, (0, y1), (dbg.shape[1], y1), (0, 255, 0), 2)
             cv2.line(dbg, (0, y2), (dbg.shape[1], y2), (0, 255, 0), 2)
-            cv2.line(dbg, (L, y1), (L, y2), (255, 0, 0), 2)
-            cv2.line(dbg, (R, y1), (R, y2), (255, 0, 0), 2)
-            cv2.line(dbg, (CX, y1), (CX, y2), (0, 0, 255), 2)
+            if circle_params:
+                cv2.circle(dbg, (CX0, CY0), RAD0, (255, 0, 0), 2)
+            else:
+                cv2.line(dbg, (L, y1), (L, y2), (255, 0, 0), 2)
+                cv2.line(dbg, (R, y1), (R, y2), (255, 0, 0), 2)
+                cv2.line(dbg, (CX_est, y1), (CX_est, y2), (0, 0, 255), 2)
             cv2.imwrite(os.path.join(debug_dir, "02_bounds_overlay.jpg"), dbg)
 
     mosaic = build_label_mosaic(strips, base_width=9000)
