@@ -17,11 +17,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app
 COPY app.py ./app.py
 
-# Create media dir for outputs
-RUN mkdir -p /app/media
-
 # Non-root (optional)
 RUN useradd -ms /bin/bash appuser
+
+# Create media dir for outputs
+RUN mkdir -p /app/media && chown appuser:appuser /app/media
+
 USER appuser
 
 ENV PORT=5050
