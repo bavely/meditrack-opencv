@@ -550,7 +550,9 @@ def extract_flat_label_image(video_path: str, mode: str = "mosaic", debug_dir: O
 def save_image(img: np.ndarray) -> str:
     filename = f"{uuid.uuid4().hex}.jpg"
     out_path = os.path.join(MEDIA_DIR, filename)
-    cv2.imwrite(out_path, img, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+    success = cv2.imwrite(out_path, img, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+    if not success:
+        raise RuntimeError(f"Failed to save image to {out_path}")
     return filename
 
 
