@@ -2,6 +2,7 @@
 import os
 import uuid
 import tempfile
+import traceback
 from typing import Tuple, Optional, Any, List
 
 import cv2
@@ -581,41 +582,16 @@ def unwrap():
         base = request.url_root.rstrip("/")
         image_url = f"{base}/media/{filename}"
         resp: dict[str, Any] = {"imageUrl": image_url}
-
-        # Optional: attach debug artifacts if available
-        if debug and debug_dir:
-            files: List[str] = []
-            for f in [
-                "01_best_frame.jpg",
-                "02_bounds_overlay.jpg",
-                "03_cyl_strip.jpg",     # representative strip
-                "03_polar.jpg",
-                "04_polar_cropped.jpg",
-            ]:
-                p = os.path.join(debug_dir, f)
-                if os.path.exists(p):
-                    rel = os.path.relpath(p, MEDIA_DIR).replace("\\", "/")
-                    files.append(f"{base}/media/{rel}")
-            if files:
-                resp["debug"] = files
-
-        return jsonify(resp)
-
     except Exception as e:
-        app.logger.exception("Processing failed")
+        traceback.print_exc()
         abort(500, description=f"Processing failed: {e}")
-
     finally:
         try:
             os.remove(tmp_path)
         except Exception:
-
-            app.logger.warning("Failed to remove temporary file", exc_info=True)
-
             pass
 
     return jsonify(resp)
-
 
 
 # =============================== Main ===============================
