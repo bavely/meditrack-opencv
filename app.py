@@ -3,6 +3,8 @@ import os
 import uuid
 import tempfile
 import traceback
+import subprocess
+from pathlib import Path
 from typing import Tuple, Optional, Any, List
 
 import cv2
@@ -63,25 +65,6 @@ def read_video_best_frame(video_path: str, sample_every: int = 2, max_frames: in
         raise RuntimeError("No frames read from video.")
     return best_frame
 
-
-def extract_frames(video_path: str, sample_rate: int = 1) -> List[np.ndarray]:
-    """Return a list of frames from the video, optionally sampling every Nth frame."""
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise RuntimeError("Failed to open video (codec/ffmpeg missing?).")
-
-    frames: List[np.ndarray] = []
-    idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if idx % sample_rate == 0:
-            frames.append(frame.copy())
-        idx += 1
-
-    cap.release()
-    return frames
 
 
 def stitch_frames(frames: List[np.ndarray], target_height: int = 400) -> np.ndarray:
@@ -576,10 +559,29 @@ def unwrap():
         tmp_path = tmp.name
 
     try:
-        frames = extract_frames(tmp_path)
-        stitched = stitch_frames(frames)
-        processed = postprocess_for_ocr(stitched)
-        filename = save_image(processed)
+        with tempfile.TemporaryDirectory() as frame_dir:
+            # Extract one frame per second using FFmpeg
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-i",
+                    tmp_path,
+                    "-vf",
+                    "fps=1",
+                    f"{frame_dir}/frame_%04d.png",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            frame_paths = sorted(Path(frame_dir).glob("frame_*.png"))
+            frames = [cv2.imread(str(p)) for p in frame_paths if p.is_file()]
+            if not frames:
+                raise RuntimeError("No frames extracted from video.")
+
+            stitched = stitch_frames(frames)
+            processed = postprocess_for_ocr(stitched)
+            filename = save_image(processed)
 
         base = request.url_root.rstrip("/")
         image_url = f"{base}/media/{filename}"
