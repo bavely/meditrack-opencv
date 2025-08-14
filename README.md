@@ -6,6 +6,9 @@ to track camera rotation between frames. Frames are sampled with
 for OCR.
 
 System-level `ffmpeg` must be available; the supplied `Dockerfile` installs it.
+Set the optional `FFMPEG_PATH` environment variable if the binary is not on
+`PATH`. The `/unwrap` endpoint checks for FFmpeg and returns a descriptive
+error if it cannot be found.
 
 ## Debugging
 Include `debug=1` as a query parameter on `/unwrap` requests to save
