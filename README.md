@@ -1,7 +1,11 @@
 # meditrack-opencv
 This service unwraps medicine bottle labels from short videos. It now supports
 building a full panoramic texture using either device IMU data or optical flow
-to track camera rotation between frames.
+to track camera rotation between frames. Frames are sampled with
+[FFmpeg](https://ffmpeg.org/) instead of OpenCV, producing a composite image
+for OCR.
+
+System-level `ffmpeg` must be available; the supplied `Dockerfile` installs it.
 
 ## Debugging
 Include `debug=1` as a query parameter on `/unwrap` requests to save
