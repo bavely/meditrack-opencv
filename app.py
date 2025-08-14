@@ -2,7 +2,6 @@
 import os
 import uuid
 import tempfile
-import traceback
 from typing import Tuple, Optional, Any, List
 
 import cv2
@@ -557,20 +556,17 @@ def unwrap():
             if files:
                 resp["debug"] = files
 
+        return jsonify(resp)
+
     except Exception as e:
-        traceback.print_exc()
+        app.logger.exception("Processing failed")
+        abort(500, description=f"Processing failed: {e}")
+
+    finally:
         try:
             os.remove(tmp_path)
         except Exception:
-            pass
-        abort(500, description=f"Processing failed: {e}")
-
-    try:
-        os.remove(tmp_path)
-    except Exception:
-        pass
-
-    return jsonify(resp)
+            app.logger.warning("Failed to remove temporary file", exc_info=True)
 
 
 # =============================== Main ===============================
