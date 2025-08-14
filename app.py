@@ -64,6 +64,52 @@ def read_video_best_frame(video_path: str, sample_every: int = 2, max_frames: in
     return best_frame
 
 
+def extract_frames(video_path: str, sample_rate: int = 1) -> List[np.ndarray]:
+    """Return a list of frames from the video, optionally sampling every Nth frame."""
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError("Failed to open video (codec/ffmpeg missing?).")
+
+    frames: List[np.ndarray] = []
+    idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if idx % sample_rate == 0:
+            frames.append(frame.copy())
+        idx += 1
+
+    cap.release()
+    return frames
+
+
+def stitch_frames(frames: List[np.ndarray], target_height: int = 400) -> np.ndarray:
+    """Resize frames to a common height and stitch them horizontally."""
+    if not frames:
+        raise ValueError("No frames to stitch.")
+
+    resized: List[np.ndarray] = []
+    for f in frames:
+        h, w = f.shape[:2]
+        new_w = int(w * (target_height / h)) if h != target_height else w
+        resized.append(cv2.resize(f, (new_w, target_height)))
+
+    return cv2.hconcat(resized)
+
+
+def postprocess_for_ocr(img: np.ndarray) -> np.ndarray:
+    """Convert to grayscale and enhance contrast for OCR."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    try:
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray = clahe.apply(gray)
+    except Exception:
+        pass
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    return thresh
+
+
 def _preprocess_gray(img: np.ndarray) -> np.ndarray:
     g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     g = cv2.GaussianBlur(g, (3, 3), 0)
@@ -516,7 +562,7 @@ def unwrap():
         abort(400, description="No file part")
 
     file = request.files["file"]
-    if not file.filename:
+    if not file or not file.filename:
         abort(400, description="No selected file")
     lower = file.filename.lower()
     if not lower.endswith((".mp4", ".mov", ".m4v", ".avi", ".mkv")):
@@ -527,48 +573,23 @@ def unwrap():
         file.save(tmp.name)
         tmp_path = tmp.name
 
-    mode = request.args.get("mode", "mosaic")  # "mosaic" (default), "cyl", or "polar"
-    debug = request.args.get("debug") == "1"
-    debug_dir = os.path.join(MEDIA_DIR, "debug", uuid.uuid4().hex) if debug else None
-
     try:
-        flat = extract_flat_label_image(tmp_path, mode=mode, debug_dir=debug_dir)
-        filename = save_image(flat)
+        frames = extract_frames(tmp_path)
+        stitched = stitch_frames(frames)
+        processed = postprocess_for_ocr(stitched)
+        filename = save_image(processed)
 
         base = request.url_root.rstrip("/")
         image_url = f"{base}/media/{filename}"
-
         resp: dict[str, Any] = {"imageUrl": image_url}
-
-        # Optional: attach debug artifacts if available
-        if debug and debug_dir:
-            files: List[str] = []
-            for f in [
-                "01_best_frame.jpg",
-                "02_bounds_overlay.jpg",
-                "03_cyl_strip.jpg",     # representative strip
-                "03_polar.jpg",
-                "04_polar_cropped.jpg",
-            ]:
-                p = os.path.join(debug_dir, f)
-                if os.path.exists(p):
-                    rel = os.path.relpath(p, MEDIA_DIR).replace("\\", "/")
-                    files.append(f"{base}/media/{rel}")
-            if files:
-                resp["debug"] = files
-
     except Exception as e:
         traceback.print_exc()
+        abort(500, description=f"Processing failed: {e}")
+    finally:
         try:
             os.remove(tmp_path)
         except Exception:
             pass
-        abort(500, description=f"Processing failed: {e}")
-
-    try:
-        os.remove(tmp_path)
-    except Exception:
-        pass
 
     return jsonify(resp)
 
