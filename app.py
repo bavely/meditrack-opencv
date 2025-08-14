@@ -4,6 +4,7 @@ import uuid
 import tempfile
 import traceback
 import subprocess
+import shutil
 from pathlib import Path
 from typing import Tuple, Optional, Any, List
 
@@ -560,10 +561,13 @@ def unwrap():
 
     try:
         with tempfile.TemporaryDirectory() as frame_dir:
+            ffmpeg_cmd = os.getenv("FFMPEG_PATH", "ffmpeg")
+            if not shutil.which(ffmpeg_cmd):
+                abort(500, description="FFmpeg not found; install it or set FFMPEG_PATH.")
             # Extract one frame per second using FFmpeg
             subprocess.run(
                 [
-                    "ffmpeg",
+                    ffmpeg_cmd,
                     "-i",
                     tmp_path,
                     "-vf",
