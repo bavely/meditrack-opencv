@@ -3,3 +3,4 @@ flask-cors==4.0.1
 gunicorn==22.0.0
 opencv-python==4.10.0.84
 numpy==1.26.4
+imageio-ffmpeg==0.4.8
