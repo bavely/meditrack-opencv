@@ -16,6 +16,12 @@ pip install -r requirements.txt
 - The service listens on port `5050` by default; override with the `PORT`
   environment variable.
 
+## Configuration
+
+- `S3_URL_TTL` controls how long the pre-signed download URLs stay valid.
+  It defaults to `300` seconds; adjust if clients need more or less time to
+  fetch artifacts.
+
 ## Docker
 
 ```bash
@@ -38,8 +44,9 @@ Accepts a form field named `file` containing a video. The response is JSON with:
 - `ocrSheetUrl` – binarized contact sheet optimized for OCR.
 - `ocrBestFrameUrl` – OCR-friendly version of the single sharpest frame.
 
-### `GET /media/<path>`
-Serves any generated artifact such as frames and sheets.
+All of these URLs are pre-signed links generated during the request. Download
+the assets directly from these URLs; they expire after `S3_URL_TTL` seconds
+(default `300`).
 
 ## Usage
 
