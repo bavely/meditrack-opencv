@@ -57,31 +57,34 @@ CORS(app)  # allow all origins in dev
 def create_s3_client():
     """Create S3 client with proper error handling"""
     try:
-        # Verify AWS credentials are set in environment
         aws_access_key = os.getenv("AWS_ACCESS_KEY_ID")
         aws_secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-        
-        if not aws_access_key or not aws_secret_key:
-            raise RuntimeError(
-                "AWS credentials not found in .env file. Please set:\n"
-                "AWS_ACCESS_KEY_ID=your_access_key\n"
-                "AWS_SECRET_ACCESS_KEY=your_secret_key"
-            )
-        
+        aws_session_token = os.getenv("AWS_SESSION_TOKEN")
+
         _boto_cfg = BotoConfig(
-            signature_version="s3v4", 
+            signature_version="s3v4",
             retries={"max_attempts": 5, "mode": "standard"},
             region_name=AWS_REGION
         )
-        
-        # Create S3 client with explicit credentials from environment
-        client = boto3.client(
-            "s3", 
-            region_name=AWS_REGION, 
-            config=_boto_cfg,
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key
-        )
+
+        client_kwargs = {
+            "region_name": AWS_REGION,
+            "config": _boto_cfg,
+        }
+
+        if aws_access_key and aws_secret_key:
+            client_kwargs["aws_access_key_id"] = aws_access_key
+            client_kwargs["aws_secret_access_key"] = aws_secret_key
+            if aws_session_token:
+                client_kwargs["aws_session_token"] = aws_session_token
+        elif aws_access_key or aws_secret_key:
+            print(
+                "Incomplete AWS credentials found in environment; "
+                "falling back to boto3 default credential chain."
+            )
+
+        # Create S3 client, relying on boto3's default credential provider chain
+        client = boto3.client("s3", **client_kwargs)
         
         # Test the connection by checking if bucket exists and is accessible
         try:
@@ -98,7 +101,9 @@ def create_s3_client():
         
         return client
     except NoCredentialsError:
-        raise RuntimeError("AWS credentials not found in .env file. Please configure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.")
+        raise RuntimeError(
+            "Unable to locate AWS credentials. Configure environment variables, an IAM role, or a shared credentials file."
+        )
     except Exception as e:
         raise RuntimeError(f"Failed to create S3 client: {e}")
 
