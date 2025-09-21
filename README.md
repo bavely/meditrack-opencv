@@ -102,14 +102,23 @@ non-OK responses and diagnose misconfigurations.
 ### `POST /unwrap`
 Accepts a form field named `file` containing a video. The response is JSON with:
 
+- `jobId` – short identifier you can persist in your system to correlate
+  follow-up processing or log lines with the underlying unwrap attempt.
 - `frames` – array of URLs for the sampled frames.
 - `sheetUrl` – color contact sheet for quick review.
 - `ocrSheetUrl` – binarized contact sheet optimized for OCR.
 - `ocrBestFrameUrl` – OCR-friendly version of the single sharpest frame.
+- `s3` – metadata describing where assets were stored. It includes
+  `bucket`, `region`, and `prefix`, which mirror the AWS settings used for the
+  job so downstream tooling can build direct S3 references if needed.
+- `timing` – performance metrics for the request. `total_s` captures the full
+  wall-clock duration, while `ffmpeg_extract_s`, `sheet_build_s`,
+  `ocr_post_s`, and `save_s` break down the major processing phases to help
+  operators monitor throughput or spot bottlenecks.
 
-All of these URLs are pre-signed links generated during the request. Download
-the assets directly from these URLs; they expire after `S3_URL_TTL` seconds
-(default `300`).
+All of the frame and sheet URLs are pre-signed links generated during the
+request. Download the assets directly from these URLs; they expire after
+`S3_URL_TTL` seconds (default `300`).
 
 ## Usage
 
@@ -117,6 +126,6 @@ the assets directly from these URLs; they expire after `S3_URL_TTL` seconds
 curl -F "file=@video.mp4" http://localhost:5050/unwrap
 ```
 
-The response includes the fields listed above along with a `timing` object for
-basic profiling.
+Persist the `jobId` alongside your own records, and use the `s3` and `timing`
+metadata to confirm where artifacts live and how long each stage took.
 
