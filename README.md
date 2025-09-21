@@ -72,7 +72,32 @@ Add `-e FFMPEG_PATH=/usr/bin/ffmpeg` when the binary is not on `PATH`.
 ## API
 
 ### `GET /health`
-Simple readiness probe. Returns `{"status": "ok"}`.
+Performs a readiness probe that also confirms the app can reach the configured
+S3 bucket and echoes the active runtime configuration. The JSON payload looks
+like:
+
+```json
+{
+  "status": "ok",
+  "s3_connection": "connected",
+  "bucket": "<bucket-name>",
+  "region": "<aws-region>",
+  "prefix": "<s3-prefix>",
+  "kms_key": "<kms-key-or-AES256>",
+  "config": {
+    "max_frames": 10,
+    "grid_cols": 4,
+    "cell_height": 340,
+    "grid_pad": 6,
+    "url_ttl": 300
+  }
+}
+```
+
+`s3_connection` reports the outcome of the bucket probe (for example,
+`"connected"` or an error string). Because the endpoint verifies S3 access and
+surfaces the active configuration values, operators can quickly interpret any
+non-OK responses and diagnose misconfigurations.
 
 ### `POST /unwrap`
 Accepts a form field named `file` containing a video. The response is JSON with:
