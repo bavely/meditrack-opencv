@@ -18,9 +18,47 @@ pip install -r requirements.txt
 
 ## Configuration
 
-- `S3_URL_TTL` controls how long the pre-signed download URLs stay valid.
-  It defaults to `300` seconds; adjust if clients need more or less time to
-  fetch artifacts.
+The service reads its configuration from environment variables. You can either
+create a local `.env` file (loaded automatically on startup) or set the
+variables in the process environment before launching the app.
+
+### Required
+
+- `AWS_REGION` – AWS region that hosts the target S3 bucket.
+- `S3_BUCKET` – S3 bucket name where frames and contact sheets will be stored.
+
+### Optional tuning flags
+
+- `S3_PREFIX` – Logical prefix inside the bucket that keeps job artifacts
+  grouped together (defaults to `meditrack`).
+- `S3_URL_TTL` – Number of seconds that generated pre-signed download URLs stay
+  valid (defaults to `300`).
+- `KMS_KEY_ID` – AWS KMS key ID or ARN to enforce SSE-KMS encryption. When not
+  provided the app falls back to S3-managed `AES256` encryption.
+- `MAX_FRAMES` – Maximum number of representative frames FFmpeg extracts from
+  each upload.
+- `GRID_COLS` – Number of columns used when laying out the contact sheet.
+- `CELL_HEIGHT` – Pixel height of each frame in the contact sheet grid.
+- `GRID_PAD` – Padding in pixels around each cell within the contact sheet.
+
+### AWS credentials & permissions
+
+The application uses the standard boto3 credential chain. Provide credentials
+through one of the following:
+
+- Environment variables such as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+  and optionally `AWS_SESSION_TOKEN`.
+- An IAM role attached to the compute environment (EC2 instance profile,
+  ECS/EKS task role, Lambda execution role, etc.).
+- A shared credentials/config file under `~/.aws`.
+
+The IAM principal must be allowed to `s3:ListBucket` (for the bucket
+availability check), `s3:PutObject`, and `s3:GetObject` on the configured
+bucket/prefix. Uploads always request server-side encryption: either SSE-KMS
+with your supplied `KMS_KEY_ID` or S3-managed `AES256` when no key is provided.
+Ensure your bucket policy and (when applicable) KMS key policy permit this
+behavior so that uploads are accepted and the generated pre-signed URLs remain
+usable.
 
 ## Docker
 
