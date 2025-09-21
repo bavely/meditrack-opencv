@@ -72,32 +72,32 @@ Add `-e FFMPEG_PATH=/usr/bin/ffmpeg` when the binary is not on `PATH`.
 ## API
 
 ### `GET /health`
-Performs a readiness probe that also confirms the app can reach the configured
-S3 bucket and echoes the active runtime configuration. The JSON payload looks
-like:
+Performs a readiness probe and validates connectivity to the configured S3
+bucket. A successful response returns `200 OK` with a JSON body structured as
+follows:
 
-```json
-{
-  "status": "ok",
-  "s3_connection": "connected",
-  "bucket": "<bucket-name>",
-  "region": "<aws-region>",
-  "prefix": "<s3-prefix>",
-  "kms_key": "<kms-key-or-AES256>",
-  "config": {
-    "max_frames": 10,
-    "grid_cols": 4,
-    "cell_height": 340,
-    "grid_pad": 6,
-    "url_ttl": 300
-  }
-}
-```
+- `status` (`string`) – High-level readiness indicator (`"ok"` when the service
+  is healthy).
+- `s3_connection` (`string`) – Result of the S3 access check (for example,
+  `"connected"` or an error message).
+- `bucket` (`string`) – Name of the S3 bucket the service uses for storage.
+- `region` (`string`) – AWS region tied to the bucket and active configuration.
+- `prefix` (`string`) – Logical bucket prefix where job artifacts are written.
+- `kms_key` (`string`) – Encryption configuration reported as the chosen KMS
+  key ID/ARN or `AES256` when falling back to S3-managed keys.
+- `config` (`object`) – Snapshot of runtime tuning parameters containing:
+  - `max_frames` (`integer`) – Maximum number of frames FFmpeg extracts per
+    upload.
+  - `grid_cols` (`integer`) – Number of columns used when assembling contact
+    sheets.
+  - `cell_height` (`integer`) – Pixel height allocated to each frame in the
+    contact sheet grid.
+  - `grid_pad` (`integer`) – Padding in pixels between cells within the grid.
+  - `url_ttl` (`integer`) – Lifetime in seconds for generated pre-signed URLs.
 
-`s3_connection` reports the outcome of the bucket probe (for example,
-`"connected"` or an error string). Because the endpoint verifies S3 access and
-surfaces the active configuration values, operators can quickly interpret any
-non-OK responses and diagnose misconfigurations.
+Because the endpoint verifies S3 access and surfaces the active configuration
+values, operators can quickly interpret non-OK responses and diagnose
+misconfigurations.
 
 ### `POST /unwrap`
 Accepts a form field named `file` containing a video. The response is JSON with:
