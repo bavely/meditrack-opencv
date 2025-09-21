@@ -102,30 +102,34 @@ misconfigurations.
 ### `POST /unwrap`
 Accepts a form field named `file` containing a video. The response is JSON with:
 
-- `jobId` – short identifier you can persist in your system to correlate
-  follow-up processing or log lines with the underlying unwrap attempt.
+- `jobId` – short identifier you can persist to correlate follow-up processing,
+  callbacks, or log entries with the originating unwrap attempt.
 - `frames` – array of URLs for the sampled frames.
 - `sheetUrl` – color contact sheet for quick review.
 - `ocrSheetUrl` – binarized contact sheet optimized for OCR.
 - `ocrBestFrameUrl` – OCR-friendly version of the single sharpest frame.
-- `s3` – metadata describing where assets were stored. It includes
-  `bucket`, `region`, and `prefix`, which mirror the AWS settings used for the
-  job so downstream tooling can build direct S3 references if needed.
-- `timing` – performance metrics for the request. `total_s` captures the full
-  wall-clock duration, while `ffmpeg_extract_s`, `sheet_build_s`,
-  `ocr_post_s`, and `save_s` break down the major processing phases to help
-  operators monitor throughput or spot bottlenecks.
+- `s3` – metadata describing where artifacts were stored so downstream systems
+  can build direct S3 references or audit storage:
+  - `bucket` – target S3 bucket name.
+  - `region` – AWS region that owns the bucket.
+  - `prefix` – logical key prefix under which the job's assets were written.
+- `timing` – performance metrics for the request to help monitor throughput and
+  spot bottlenecks:
+  - `total_s` – overall wall-clock processing duration.
+  - `ffmpeg_extract_s` – time spent extracting representative frames.
+  - `sheet_build_s` – time required to assemble the contact sheet.
+  - `ocr_post_s` – time consumed by OCR-oriented post-processing steps.
+  - `save_s` – time needed to upload artifacts to S3.
 
 All of the frame and sheet URLs are pre-signed links generated during the
 request. Download the assets directly from these URLs; they expire after
-`S3_URL_TTL` seconds (default `300`).
+`S3_URL_TTL` seconds (default `300`). Use `jobId` for bookkeeping,
+consult the `s3` metadata when you need raw S3 paths, and review `timing` to
+track performance trends.
 
 ## Usage
 
 ```bash
 curl -F "file=@video.mp4" http://localhost:5050/unwrap
 ```
-
-Persist the `jobId` alongside your own records, and use the `s3` and `timing`
-metadata to confirm where artifacts live and how long each stage took.
 
